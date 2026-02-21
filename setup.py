@@ -181,7 +181,7 @@ class CMakeBuild(build_ext):
                         "--depth",
                         "1",
                         "--branch",
-                        "mneme-optaas",
+                        "optaas-update-fixes",
                         self.PROTEUS_REPO,
                         proteus_path,
                     ],
