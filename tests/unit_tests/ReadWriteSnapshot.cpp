@@ -3,6 +3,7 @@
 #include "mneme/MnemeKernelInfo.hpp"
 #include "mneme/MnemeLogger.hpp"
 #include "mneme/MnemeSnapshot.hpp"
+#include "mneme/MnemeAnnotation.hpp"
 #include <cstdint>
 #include <cstring>
 #include <filesystem>

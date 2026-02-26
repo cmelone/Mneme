@@ -20,7 +20,9 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include <cstddef>
 #include <cstdint>
+#include <iostream>
 #include <optional>
 #include <string>
 #include <type_traits>
@@ -74,58 +76,53 @@ struct Metadata {
 
 // --------- Builtin dtype mapping helpers (optional sugar) ------------------
 
-template <class T> struct builtin_dtype_of {
+template <class T>
+struct builtin_dtype_of {
   static constexpr BuiltinDType value = BuiltinDType::U8;
 };
 
-template <> struct builtin_dtype_of<float> {
-  static constexpr BuiltinDType value = BuiltinDType::F32;
-};
-template <> struct builtin_dtype_of<double> {
-  static constexpr BuiltinDType value = BuiltinDType::F64;
-};
+template <> struct builtin_dtype_of<float>  { static constexpr BuiltinDType value = BuiltinDType::F32; };
+template <> struct builtin_dtype_of<double> { static constexpr BuiltinDType value = BuiltinDType::F64; };
 
-template <> struct builtin_dtype_of<std::int8_t> {
-  static constexpr BuiltinDType value = BuiltinDType::I8;
-};
-template <> struct builtin_dtype_of<std::uint8_t> {
-  static constexpr BuiltinDType value = BuiltinDType::U8;
-};
-template <> struct builtin_dtype_of<std::int16_t> {
-  static constexpr BuiltinDType value = BuiltinDType::I16;
-};
-template <> struct builtin_dtype_of<std::uint16_t> {
-  static constexpr BuiltinDType value = BuiltinDType::U16;
-};
-template <> struct builtin_dtype_of<std::int32_t> {
-  static constexpr BuiltinDType value = BuiltinDType::I32;
-};
-template <> struct builtin_dtype_of<std::uint32_t> {
-  static constexpr BuiltinDType value = BuiltinDType::U32;
-};
-template <> struct builtin_dtype_of<std::int64_t> {
-  static constexpr BuiltinDType value = BuiltinDType::I64;
-};
-template <> struct builtin_dtype_of<std::uint64_t> {
-  static constexpr BuiltinDType value = BuiltinDType::U64;
-};
+template <> struct builtin_dtype_of<std::int8_t>   { static constexpr BuiltinDType value = BuiltinDType::I8;  };
+template <> struct builtin_dtype_of<std::uint8_t>  { static constexpr BuiltinDType value = BuiltinDType::U8;  };
+template <> struct builtin_dtype_of<std::int16_t>  { static constexpr BuiltinDType value = BuiltinDType::I16; };
+template <> struct builtin_dtype_of<std::uint16_t> { static constexpr BuiltinDType value = BuiltinDType::U16; };
+template <> struct builtin_dtype_of<std::int32_t>  { static constexpr BuiltinDType value = BuiltinDType::I32; };
+template <> struct builtin_dtype_of<std::uint32_t> { static constexpr BuiltinDType value = BuiltinDType::U32; };
+template <> struct builtin_dtype_of<std::int64_t>  { static constexpr BuiltinDType value = BuiltinDType::I64; };
+template <> struct builtin_dtype_of<std::uint64_t> { static constexpr BuiltinDType value = BuiltinDType::U64; };
+
+// --------- Implementation hook (defined in Mneme library) -----------------
+
+namespace detail {
+
+// The library provides the implementation of this function.
+// It must be safe to call multiple times for the same pointer (idempotent or last-wins).
+void annotate_impl(const void* ptr, Metadata md);
+
+} // namespace detail
 
 // --------- User-facing API ------------------------------------------------
 
 // Primary user API: annotate a pointer with metadata.
-void annotate(const void *ptr, Metadata md);
+inline void annotate(const void* ptr, Metadata md) {
+  detail::annotate_impl(ptr, md);
+}
 
 // Convenience overload for non-const pointers.
-void annotate(void *ptr, Metadata md);
+inline void annotate(void* ptr, Metadata md) {
+  detail::annotate_impl(ptr, md);
+}
 
-// Typed helper: sets builtin dtype automatically when T maps to a known
-// BuiltinDType. If T is unknown, this will leave builtin=Unknown (still useful
-// if you set dtype=Custom later).
-template <class T> inline void annotate(T *ptr, Metadata md = {}) {
+// Typed helper: sets builtin dtype automatically when T maps to a known BuiltinDType.
+// If T is unknown, this will leave builtin=Unknown (still useful if you set dtype=Custom later).
+template <class T>
+inline void annotate(T* ptr, Metadata md = {}) {
   // If the user didn't specify dtype explicitly, keep default Builtin.
   // If they *did* specify Custom, we don't override anything here.
   md.builtin = builtin_dtype_of<std::remove_cv_t<T>>::value;
-  annotate(static_cast<const void *>(ptr), std::move(md));
+  detail::annotate_impl(static_cast<const void*>(ptr), md);
 }
 
 } // namespace mneme
