@@ -106,23 +106,19 @@ void annotate_impl(const void* ptr, Metadata md);
 // --------- User-facing API ------------------------------------------------
 
 // Primary user API: annotate a pointer with metadata.
-inline void annotate(const void* ptr, Metadata md) {
-  detail::annotate_impl(ptr, md);
-}
+void annotate(const void *ptr, Metadata md);
 
 // Convenience overload for non-const pointers.
-inline void annotate(void* ptr, Metadata md) {
-  detail::annotate_impl(ptr, md);
-}
+void annotate(void *ptr, Metadata md);
 
 // Typed helper: sets builtin dtype automatically when T maps to a known BuiltinDType.
 // If T is unknown, this will leave builtin=Unknown (still useful if you set dtype=Custom later).
 template <class T>
-inline void annotate(T* ptr, Metadata md = {}) {
+inline void annotate(T *ptr, Metadata md = {}) {
   // If the user didn't specify dtype explicitly, keep default Builtin.
   // If they *did* specify Custom, we don't override anything here.
   md.builtin = builtin_dtype_of<std::remove_cv_t<T>>::value;
-  detail::annotate_impl(static_cast<const void*>(ptr), md);
+  annotate(static_cast<const void *>(ptr), std::move(md));
 }
 
 } // namespace mneme
