@@ -1,4 +1,5 @@
 #pragma once
+#include <algorithm>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -8,6 +9,7 @@
 #include <llvm/Support/raw_ostream.h>
 #include <optional>
 #include <regex>
+#include <vector>
 
 #include "llvm/Demangle/Demangle.h"
 #include <llvm/ADT/StableHashing.h>
@@ -18,6 +20,7 @@
 #include "proteus/CompilerInterfaceDevice.h"
 #include "proteus/Hashing.h"
 #include <proteus/JitEngineDevice.h>
+#include <proteus/Utils.h>
 
 #include "mneme/DeviceTraits.hpp"
 #include "mneme/MnemeKernelInfo.hpp"
@@ -407,9 +410,58 @@ class RecordDatabase {
   bool HasRegex;
   llvm::DenseMap<uint64_t, KernelInstancesCollection> KernelRecords;
   uint64_t MaxRecordings;
+  bool ShouldRecordThisRank;
 
 public:
-  RecordDatabase() : KernelWhiteList(""), HasRegex(false) {
+  RecordDatabase() : KernelWhiteList(""), HasRegex(false), ShouldRecordThisRank(false) {
+    // Check MNEME_RECORD_RANKS environment variable to determine which ranks should record
+    auto RecordRanksEnv = std::getenv("MNEME_RECORD_RANKS");
+
+    if (!RecordRanksEnv || std::string(RecordRanksEnv).empty()) {
+      // If not set or empty, disable recording but allow execution to continue
+      ShouldRecordThisRank = false;
+      LOG_DEBUG("RecordDatabase: MNEME_RECORD_RANKS not set or empty, recording disabled");
+    } else {
+      // Parse comma-separated list of ranks
+      try {
+        int currentRank = std::stoi(getDistributedRank());
+        std::string ranksStr(RecordRanksEnv);
+        std::vector<int> recordRanks;
+
+        // Parse comma-separated ranks
+        size_t start = 0;
+        size_t end = ranksStr.find(',');
+        while (end != std::string::npos) {
+          std::string rankStr = ranksStr.substr(start, end - start);
+          // Trim whitespace
+          rankStr.erase(0, rankStr.find_first_not_of(" \t"));
+          rankStr.erase(rankStr.find_last_not_of(" \t") + 1);
+          if (!rankStr.empty()) {
+            recordRanks.push_back(std::stoi(rankStr));
+          }
+          start = end + 1;
+          end = ranksStr.find(',', start);
+        }
+        // Handle last rank (or only rank if no commas)
+        std::string lastRankStr = ranksStr.substr(start);
+        lastRankStr.erase(0, lastRankStr.find_first_not_of(" \t"));
+        lastRankStr.erase(lastRankStr.find_last_not_of(" \t") + 1);
+        if (!lastRankStr.empty()) {
+          recordRanks.push_back(std::stoi(lastRankStr));
+        }
+
+        // Check if current rank is in the list
+        ShouldRecordThisRank = std::find(recordRanks.begin(), recordRanks.end(), currentRank) != recordRanks.end();
+
+        LOG_DEBUG("RecordDatabase: Detected rank {}, MNEME_RECORD_RANKS='{}', recording: {}",
+                  currentRank, RecordRanksEnv, ShouldRecordThisRank);
+      } catch (...) {
+        // If rank detection or parsing fails, disable recording
+        ShouldRecordThisRank = false;
+        LOG_DEBUG("RecordDatabase: Rank detection or parsing failed, recording disabled");
+      }
+    }
+
     auto WhiteList = std::getenv("MNEME_RR_KERNELS");
     if (WhiteList) {
       HasRegex = true;
@@ -434,18 +486,44 @@ public:
   }
 
   ~RecordDatabase() {
-    for (auto &[StaticHash, Record] : KernelRecords) {
-      auto JsonFilename =
-          MnemeDirectory / (std::to_string(StaticHash) + ".json");
-      std::error_code EC;
-      auto JSONRecord = Record.toJSON(StaticHash);
-      llvm::raw_fd_ostream JsonOS(JsonFilename.string(), EC);
-      JsonOS << llvm::json::Value(std::move(JSONRecord));
-      JsonOS.close();
+    // JSON files are now written incrementally when kernels are recorded,
+    // so the destructor has nothing to do.
+    if (!ShouldRecordThisRank) {
+      LOG_DEBUG("RecordDatabase destructor: Skipping for non-recording rank");
+      return;
     }
+    LOG_DEBUG("RecordDatabase destructor: All JSON files already written");
+  }
+
+  void writeKernelJSON(uint64_t StaticHash) {
+    if (!ShouldRecordThisRank) {
+      return;  // Should not happen, but guard anyway
+    }
+    auto It = KernelRecords.find(StaticHash);
+    if (It == KernelRecords.end()) {
+      LOG_WARN("Attempted to write JSON for unrecorded kernel hash {}", StaticHash);
+      return;
+    }
+    auto JsonFilename =
+        MnemeDirectory / (std::to_string(StaticHash) + ".json");
+    std::error_code EC;
+    auto JSONRecord = It->second.toJSON(StaticHash);
+    llvm::raw_fd_ostream JsonOS(JsonFilename.string(), EC);
+    if (EC) {
+      LOG_WARN("Failed to write JSON for kernel {}: {}", StaticHash, EC.message());
+      return;
+    }
+    JsonOS << llvm::json::Value(std::move(JSONRecord));
+    JsonOS.close();
+    LOG_DEBUG("Wrote JSON for kernel {} to {}", StaticHash, JsonFilename.string());
   }
 
   bool shouldRecord(const std::string &KernelName) const {
+    // First check if this rank should record at all
+    if (!ShouldRecordThisRank) {
+      return false;
+    }
+
     if (!HasRegex)
       return true;
 
@@ -456,6 +534,11 @@ public:
       LOG_WARN("Invalid regex: {}, ... falling back and recording everything");
     }
     return true;
+  }
+
+  // Public method for early filtering before expensive extraction
+  bool shouldRecordKernelByName(const std::string &KernelName) const {
+    return shouldRecord(KernelName);
   }
 
   template <DeviceVendors VendorTypes>
@@ -475,15 +558,23 @@ public:
       return std::nullopt;
     }
 
-    auto IT = KernelRecords.try_emplace(
-        KInfo.getStaticHash().getValue(),
-        KernelInstancesCollection(getDir(), VAddr, VASize, KInfo,
-                                  MaxRecordings));
-    LOG_INFO("Created instance");
-    return IT.first->second.takeSnapshot<VendorTypes>(
+    auto StaticHash = KInfo.getStaticHash().getValue();
+    auto It = KernelRecords.find(StaticHash);
+    if (It == KernelRecords.end()) {
+      It =
+          KernelRecords
+              .insert({StaticHash, KernelInstancesCollection(
+                                       getDir(), VAddr, VASize, KInfo,
+                                       MaxRecordings)})
+              .first;
+      LOG_INFO("Created record collection for static hash {}", StaticHash);
+    } else {
+      LOG_DEBUG("Reusing record collection for static hash {}", StaticHash);
+    }
+    return It->second.takeSnapshot<VendorTypes>(
         MnemeDirectory, KInfo.getBinaryInfo().getVarNameToGlobalInfo(),
         DeviceMemory, GridDim, BlockDim, Args, SharedMem, Stream,
-        KInfo.getStaticHash().getValue());
+        StaticHash);
   }
 
   const std::string getDir() const { return MnemeDirectory.string(); }

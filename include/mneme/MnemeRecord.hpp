@@ -23,6 +23,7 @@
 
 #include <proteus/CompilerInterfaceDevice.h>
 #include <proteus/JitEngineDevice.h>
+#include <proteus/Utils.h>
 
 #include "mneme/DeviceTraits.hpp"
 #include "mneme/MnemeKernelInfo.hpp"
@@ -48,6 +49,9 @@ protected:
   // NOTE: We only keep track of the first time we set the device id. Once we
   // create the allocator we assume that the allocations go to the same device
   int DeviceID;
+
+  // Store the MPI rank for filtering recording to rank 0 only
+  int Rank;
 
   // Mneme serializes all kernel executions. This the lock being used to do so
   std::mutex GlobalLock;
@@ -225,8 +229,17 @@ public:
       return origLaunchKernel(func, GridDim, BlockDim, Args, SharedMem, Stream);
     }
     auto &KInfo = OptionalKernelInfo.value().get();
+
+    // Early filter: check if this kernel should be recorded BEFORE expensive extraction
+    // This checks both rank eligibility and kernel name filtering
+    if (!DB.shouldRecordKernelByName(KInfo.getName())) {
+      LOG_DEBUG("Skipping kernel {} due to filter or rank", KInfo.getName());
+      return origLaunchKernel(func, GridDim, BlockDim, Args, SharedMem, Stream);
+    }
+    
     auto &BinInfo = KInfo.getBinaryInfo();
     BinInfo.mapGlobals();
+    LOG_DEBUG("CNM Recording kernel for rank {}", Rank);
     LOG_DEBUG("Continue with {}", KInfo.getName());
     Proteus.extractModuleAndBitcode(KInfo);
 
@@ -254,6 +267,8 @@ public:
                "{}) SHM_SIZE:{}",
                func, KInfo.getName(), GridDim.x, GridDim.y, GridDim.z,
                BlockDim.x, BlockDim.y, BlockDim.z, SharedMem);
+      // Write JSON after epilogue is recorded
+      DB.writeKernelJSON(Hash.getValue());
     }
     return ret;
   }
@@ -280,6 +295,9 @@ public:
     proteusLib = dlopen("libproteus.so", RTLD_NOW);
     RecordReplayDir = DB.getDir();
     DeviceID = -1;
+
+    // Detect and store the MPI rank
+    Rank = std::stoi(getDistributedRank());
 
     // Redirect overloaded device runtime functions.
     reinterpret_cast<void *&>(proteusLaunchKernel) =
